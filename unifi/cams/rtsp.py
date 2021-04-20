@@ -1,7 +1,9 @@
 import subprocess
 import tempfile
 
-from aiohttp import web
+import aiofiles
+
+from aiohttp import ClientSession, BasicAuth, web
 
 from unifi.cams.base import UnifiCamBase
 
@@ -19,6 +21,9 @@ class RTSPCam(UnifiCamBase):
     def add_parser(self, parser):
         super().add_parser(parser)
         parser.add_argument("--source", "-s", required=True, help="Stream source")
+        parser.add_argument("--username", "-u", required=False, help="Camera username")
+        parser.add_argument("--password", "-p", required=False, help="Camera password")
+        parser.add_argument("--snapshot_url", "-i", required=False, help="Snapshot image")
         parser.add_argument(
             "--http-api",
             default=0,
@@ -27,6 +32,12 @@ class RTSPCam(UnifiCamBase):
         )
 
     async def get_snapshot(self):
+        if not self.args.snapshot_url:
+            return self.get_snapshot_ffmpeg()
+        else:
+            return await self.get_snapshot_url()
+
+    async def get_snapshot_ffmpeg(self):
         if not self.snapshot_stream or self.snapshot_stream.poll() is not None:
             cmd = f'ffmpeg -nostdin -y -re -rtsp_transport {self.args.rtsp_transport} -i "{self.args.source}" -vf fps=1 -update 1 {self.snapshot_dir}/screen.jpg'
             self.logger.info(f"Spawning stream for snapshots: {cmd}")
@@ -35,7 +46,25 @@ class RTSPCam(UnifiCamBase):
             )
         return "{}/screen.jpg".format(self.snapshot_dir)
 
+    async def get_snapshot_url(self):
+        img_file = "{}/screen.jpg".format(self.snapshot_dir)
+        url = self.args.snapshot_url
+        self.logger.info(f"Fetching snapshot... {img_file} {url}")
+        try:
+            async with self.session.request("GET", url) as resp:
+                async with aiofiles.open(img_file, "wb") as f:
+                    await f.write(await resp.read())
+        except aiohttp.ClientError:
+            self.logger.error("Failed to get snapshot")
+        return img_file
+
     async def run(self):
+        if self.args.snapshot_url:
+            if not self.args.username and self.args.password:
+                self.logger.info('No username or password provided for snapshot')
+                self.session = ClientSession()
+            else:
+                self.session = ClientSession(auth=BasicAuth(self.args.username, self.args.password))
         if self.args.http_api:
             self.logger.info(f"Enabling HTTP API on port {self.args.http_api}")
 
